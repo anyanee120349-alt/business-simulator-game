@@ -1,0 +1,690 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Business Simulator Game V1</title>
+<link href="https://fonts.googleapis.com/css2?family=Prompt:wght@400;700&display=swap" rel="stylesheet">
+<style>
+    body {
+        margin:0; padding:0;
+        background: linear-gradient(to bottom, #b3e5fc, #e1f5fe);
+        display:flex; justify-content:center; align-items:center;
+        height:100vh;
+        /* ใช้ Font Prompt ที่โหลดมา */
+        font-family:'Prompt',sans-serif; 
+    }
+    #game-container {
+        width:360px; height:640px;
+        background-color:#cce5ff;
+        border-radius:20px;
+        box-shadow:0 8px 16px rgba(0,0,0,0.2);
+        overflow:hidden;
+    }
+    canvas { border-radius:20px; }
+</style>
+<script src="https://cdn.jsdelivr.net/npm/phaser@3.80.0/dist/phaser.js"></script>
+</head>
+<body>
+<div id="game-container"></div>
+
+<script>
+/* ================= CONFIG ================= */
+const GAME_WIDTH = 360;
+const GAME_HEIGHT = 640;
+const MAX_STOCK = 6;
+const GAME_TIME = 60;
+const PENALTY_PER_MISMATCH = 5;
+let BOX_CAPACITY = 4; 
+
+let ITEMS = [
+    { key: 'A', name: 'แอปเปิ้ล', img: 'png/01.png', baseValue:10, baseCost: 5, value:10, cost: 5 },
+    { key: 'B', name: 'นม', img: 'png/02.png', baseValue:10, baseCost: 4, value:10, cost: 4 },
+    { key: 'C', name: 'คุกกี้', img: 'png/03.png', baseValue:10, baseCost: 6, value:12, cost: 6 },
+    { key: 'D', name: 'ช็อกโกแลต', img: 'png/04.png', baseValue:10, baseCost: 8, value:10, cost: 8 },
+    { key: 'E', name: 'น้ำผลไม้', img: 'png/05.png', baseValue:10, baseCost: 5, value:10, cost: 5 },
+    { key: 'F', name: 'แครอท', img: 'png/06.png', baseValue:8, baseCost: 3, value:8, cost: 3 }, 
+    { key: 'G', name: 'ขนมปัง', img: 'png/07.png', baseValue:10, baseCost: 4, value:10, cost: 4 },
+    { key: 'H', name: 'กล้วย', img: 'png/08.png', baseValue:9, baseCost: 4, value:9, cost: 4 },
+    { key: 'I', name: 'สตรอว์เบอร์รี', img: 'png/09.png', baseValue:10, baseCost: 10, value:8, cost: 8 }
+];
+
+let stock = {};
+let score = 0;
+let timeLeft = GAME_TIME;
+let currentOrder = {};
+let boxContents = {};
+let deliveredOrders = 0;
+let timerPaused = false;
+let level = 1; 
+let ordersToLevelUp = 3; 
+let isRushOrder = false; 
+
+/* -------------- helpers -------------- */
+function randomInt(min,max){ return Math.floor(Math.random()*(max-min+1))+min; }
+function randomizePrices() {
+    ITEMS.forEach(item => {
+        item.value = randomInt(item.baseValue * 0.8, item.baseValue * 1.2);
+        item.cost = randomInt(item.baseCost * 0.9, item.baseCost * 1.1);
+        if (item.cost < 1) item.cost = 1;
+    });
+}
+function generateOrder(){
+    let n = randomInt(1, Math.min(3, Math.floor(BOX_CAPACITY / 2))); 
+    let pool = ITEMS.map(i=>i.key);
+    let order = {};
+    for(let i=0;i<n;i++){
+        let idx = randomInt(0,pool.length-1);
+        let k = pool.splice(idx,1)[0];
+        let qty = Math.max(1, randomInt(1, Math.min(3, stock[k] || 0)));
+        if(stock[k] <= 0) continue;
+        order[k] = qty;
+    }
+    return order;
+}
+function orderText(order){
+    let lines = [];
+    for(let k in order){
+        let it = ITEMS.find(i=>i.key===k);
+        lines.push(`${it.name} x${order[k]}`);
+    }
+    return lines.join('\n') || 'ไม่มีรายการ';
+}
+function getTotalItemsInBox(){
+    let total=0;
+    for(let k in boxContents)total+=boxContents[k];
+    return total;
+}
+function isOrderMatch(order, box){
+    let aKeys = Object.keys(order).filter(k=>order[k]>0).sort();
+    let bKeys = Object.keys(box).filter(k=>box[k]>0).sort();
+    if(aKeys.length !== bKeys.length) return false;
+    for(let k of aKeys) if(!box[k] || order[k] !== box[k]) return false;
+    return true;
+}
+function computePenalty(order, box){
+    let keys = new Set([...Object.keys(order), ...Object.keys(box)]);
+    let pen = 0;
+    for(let k of keys){
+        let need = order[k]||0;
+        let have = box[k]||0;
+        pen += Math.abs(need - have) * PENALTY_PER_MISMATCH;
+    }
+    return pen;
+}
+function resetBoxContents(){
+    ITEMS.forEach(i => boxContents[i.key] = 0);
+}
+
+/* -------------- Leaderboard -------------- */
+function getLeaderboard(){
+    return JSON.parse(localStorage.getItem('leaderboard') || '[]');
+}
+function saveLeaderboard(data){
+    localStorage.setItem('leaderboard', JSON.stringify(data));
+}
+function addScoreToLeaderboard(name, score){
+    const data = getLeaderboard();
+    data.push({name, score});
+    data.sort((a,b)=>b.score - a.score);
+    if(data.length>10) data.length = 10;
+    saveLeaderboard(data);
+}
+
+
+/* ================= SCENES ================= */
+class MenuScene extends Phaser.Scene {
+    constructor(){ super('MenuScene'); }
+    preload(){ 
+        this.load.image('logo','https://cdn-icons-png.flaticon.com/512/3081/3081559.png');
+        this.load.image('bg_menu','png/11.png'); 
+        
+        // 🆕 NEW: โหลดเสียงคลิกปุ่ม
+        this.load.audio('click', 'audio/click.mp3');
+    }
+    create(){
+        // 🆕 NEW: ฟังก์ชันเล่นเสียงคลิก (สำหรับ MenuScene)
+        this.playClickSound = () => {
+            this.sound.play('click', { volume: 0.8 });
+        };
+        
+        this.add.image(GAME_WIDTH/2,GAME_HEIGHT/2,'bg_menu').setDisplaySize(GAME_WIDTH,GAME_HEIGHT);
+        this.add.image(GAME_WIDTH/2,120,'logo').setDisplaySize(100,100);
+        this.add.text(GAME_WIDTH/2,220,'Business Simulator Game',{fontSize:'25px',color:'#003366',fontStyle:'bold', fontFamily: 'Prompt'}).setOrigin(0.5);
+
+        this.createButton('START ▶️',320,()=>{
+            score=0; timeLeft=GAME_TIME; deliveredOrders=0;
+            ITEMS.forEach(i => stock[i.key] = MAX_STOCK);
+            resetBoxContents(); currentOrder={};
+            randomizePrices(); 
+            level = 1; ordersToLevelUp = 3; BOX_CAPACITY = 4;
+            this.scene.start('GameScene');
+        });
+        this.createButton('HOW TO PLAY 📘',390,()=>alert('ลากสินค้าตามออเดอร์ลงกล่องให้ครบภายในเวลาที่กำหนด! การส่งผิดจะถูกหักคะแนน และการเติมสต็อกก็มีค่าใช้จ่าย! แต่ละรอบราคาซื้อขายจะไม่เท่ากัน!'));
+        this.createButton('RANKING 🏆',460,()=>{
+            const data=getLeaderboard();
+            if(data.length===0){alert('ยังไม่มีคะแนนในตาราง');return;}
+            let text='🏆 อันดับผู้เล่นสูงสุด 🏆\n\n';
+            data.forEach((d,i)=>text+=`${i+1}. ${d.name} — ${d.score} คะแนน\n`);
+            alert(text);
+        });
+        this.add.text(GAME_WIDTH/2,600,'© 2025 Business Simulator',{ fontSize:'10px', color:'#333', fontFamily: 'Prompt'}).setOrigin(0.5);
+    }
+    createButton(text,y,callback){
+        const btn=this.add.text(GAME_WIDTH/2,y,text,{fontSize:'18px',backgroundColor:'#ffcc00',padding:{x:20,y:10},color:'#000', fontFamily: 'Prompt'})
+        .setOrigin(0.5).setInteractive({useHandCursor:true});
+        // 🆕 NEW: เพิ่มเสียงคลิก
+        btn.on('pointerdown',() => { 
+            this.playClickSound(); 
+            callback(); 
+        });
+        btn.on('pointerover',()=>btn.setStyle({backgroundColor:'#ffee58'}));
+        btn.on('pointerout',()=>btn.setStyle({backgroundColor:'#ffcc00'}));
+    }
+}
+
+/* -------- Game Scene (SFX กำหนดเอง) -------- */
+class GameScene extends Phaser.Scene {
+    constructor(){ super('GameScene'); }
+    preload(){ 
+        this.load.image('bg_game','png/13.png');
+        ITEMS.forEach(i => this.load.image(i.key,i.img));
+        
+        // 🎧 โหลดไฟล์เสียง SFX ตามชื่อที่คุณกำหนด
+        this.load.audio('drop', 'audio/pop.mp3');         // เสียงวางสำเร็จ (pop.mp3)
+        this.load.audio('success', 'audio/winner.mp3');   // เสียงส่งสำเร็จ/LevelUp (winner.mp3)
+        this.load.audio('fail', 'audio/classic.mp3');       // เสียงผิดพลาด/กล่องเต็ม (classic.mp3)
+        
+        // 🆕 NEW: โหลดเสียงคลิกปุ่ม
+        this.load.audio('click', 'audio/click.mp3'); 
+    }
+
+    create(){
+        // 🆕 NEW: ฟังก์ชันเล่นเสียงคลิก (สำหรับ GameScene)
+        this.playClickSound = () => {
+            this.sound.play('click', { volume: 0.8 });
+        };
+        
+        this.add.image(GAME_WIDTH/2, GAME_HEIGHT/2, 'bg_game').setDisplaySize(GAME_WIDTH, GAME_HEIGHT);
+        
+        const textStyle = {fontSize:'16px',color:'#000', fontFamily: 'Prompt'};
+        
+        // สถานะ
+        this.timeText=this.add.text(10,10,'เวลา: '+timeLeft+' วิ', textStyle);
+        this.scoreText=this.add.text(250,10,'คะแนน: '+score, textStyle);
+        this.levelText = this.add.text(10, 60, `Level: ${level}`, textStyle); 
+        this.progressText = this.add.text(GAME_WIDTH/2, 60, `(${deliveredOrders}/${ordersToLevelUp} ออเดอร์)`, textStyle).setOrigin(0.5); 
+
+        
+        // ปุ่ม Menu
+        this.createHeaderButton('🏠 เมนู', 10, 90, () => {
+            this.scene.start('MenuScene');
+        }); 
+        
+        // กล่องบรรจุสินค้า
+        this.BOX_Y = 530;
+        this.box=this.add.rectangle(GAME_WIDTH/2, this.BOX_Y, 220, 80, 0xfff8e1).setStrokeStyle(2,0x000).setInteractive();
+        
+        // เก็บ Sprite ของสินค้าที่ถูกวางในกล่อง
+        this.boxSprites = this.add.group();
+
+        // ปุ่ม '🧽 ล้าง'
+        this.createContextualButton('🧽 ล้าง', GAME_WIDTH/2 + 130, this.BOX_Y, () => this.clearBox());
+        this.boxCapacityText = this.add.text(GAME_WIDTH/2, this.BOX_Y - 50, `ความจุกล่อง: ${BOX_CAPACITY}`, {fontSize:'14px',color:'#555', fontFamily: 'Prompt'}).setOrigin(0.5); 
+        
+        // ปุ่ม Action Bar
+        const BUTTON_Y = 600;
+        const MARGIN = 10; 
+        
+        const stockBtn = this.createStockButton('🛒 สต็อก', MARGIN, BUTTON_Y, () => {timerPaused=true;this.scene.launch('StockScene');});
+        const submitBtn = this.createSubmitButton('🚚 ส่งของ', GAME_WIDTH - MARGIN, BUTTON_Y, () => this.submitOrder());
+        
+        const spaceStart = stockBtn.getBounds().right + MARGIN;
+        const spaceEnd = submitBtn.getBounds().x - MARGIN;
+        const orderBtnX = (spaceStart + spaceEnd) / 2; 
+        
+        this.createSecondaryButton('📦 ออเดอร์', orderBtnX, BUTTON_Y, () => this.newOrder());
+
+
+        // สร้างสินค้าและป้ายกำกับ
+        this.itemSprites = []; 
+        this.stockTexts = {}; 
+        this.boxTexts = {};
+        this.initialPositions = {}; 
+        
+        ITEMS.forEach((item,i)=>{
+            const x=60+(i%3)*120, y=120+Math.floor(i/3)*100;
+            const sp=this.add.image(x,y,item.key).setDisplaySize(60,60).setInteractive();
+            sp.setData('key',item.key); 
+            this.input.setDraggable(sp); 
+            this.itemSprites.push(sp);
+            
+            this.initialPositions[item.key] = {x: x, y: y}; 
+            
+            const st=this.add.text(x,y+40,stock[item.key] + ` (${ITEMS.find(i=>i.key===item.key).value})`,{fontSize:'14px',color:'#000', fontFamily: 'Prompt'}).setOrigin(0.5);
+            this.stockTexts[item.key]=st;
+            
+            const bt=this.add.text(x,y+60,'กล่อง: 0',{fontSize:'12px',color:'#c00', fontFamily: 'Prompt'}).setOrigin(0.5);
+            this.boxTexts[item.key]=bt;
+        });
+
+        // จัดการลากและวาง
+        this.input.on('drag',(p,obj,x,y)=>{obj.x=x;obj.y=y;});
+        this.input.on('dragend',(p,obj)=>{
+            const k=obj.getData('key');
+            
+            // ตรวจสอบการวางลงกล่อง
+            if(Phaser.Geom.Intersects.RectangleToRectangle(obj.getBounds(),this.box.getBounds())){
+                if(getTotalItemsInBox() >= BOX_CAPACITY) {
+                    this.showTempMessage(`กล่องเต็ม! (ความจุ ${BOX_CAPACITY})`, 800, '#ff9800');
+                    this.sound.play('fail'); // 🎧 เสียง classic.mp3
+                } else if(stock[k]>0){
+                    
+                    // 1. ลดสต็อก & เพิ่มใน BoxContents
+                    stock[k]--;
+                    boxContents[k]++;
+                    
+                    // 2. สร้างสำเนาของสินค้ามาวางในกล่อง
+                    this.dropItemIntoBox(k);
+                    this.sound.play('drop'); // 🎧 เสียง pop.mp3
+                    
+                    // 3. อัปเดต UI
+                    this.stockTexts[k].setText(stock[k] + ` (${ITEMS.find(i=>i.key===k).value})`);
+                    this.boxTexts[k].setText('กล่อง: '+boxContents[k]);
+                    
+                } else {
+                    this.showTempMessage('สินค้าหมด!',800);
+                    this.sound.play('fail'); // 🎧 เสียง classic.mp3
+                }
+            }
+            // 4. Sprite ต้นฉบับเด้งกลับไปที่ตำแหน่งสต็อกเสมอ
+            this.resetPosition(obj); 
+        });
+
+        this.newOrder();
+        
+        // ตัวจับเวลา
+        this.timer=this.time.addEvent({delay:1000,loop:true,callback:()=>{
+            if(!timerPaused){
+                timeLeft--; 
+                this.timeText.setText('เวลา: '+timeLeft+' วิ');
+                if(isRushOrder && timeLeft <= (this.rushOrderStartTime - 15)) {
+                    this.showTempMessage('❌ ออเดอร์เร่งด่วนหมดเวลา!', 1500, '#d32f2f');
+                    isRushOrder = false;
+                    this.newOrder(); 
+                    this.sound.play('fail'); // 🎧 เสียง classic.mp3
+                    return;
+                }
+                if(timeLeft<=0){
+                    this.scene.start('ResultScene');
+                }
+            }
+        }});
+    }
+    
+    // ฟังก์ชันสร้างสำเนาสินค้าและวางในกล่อง
+    dropItemIntoBox(key) {
+        // ตำแหน่งในกล่อง (สุ่มเล็กน้อยเพื่อความสวยงาม)
+        const boxX = GAME_WIDTH / 2;
+        const boxY = this.BOX_Y;
+        const randomX = randomInt(boxX - 80, boxX + 80);
+        const randomY = randomInt(boxY - 20, boxY + 20);
+
+        const clone = this.add.image(randomX, randomY, key)
+            .setDisplaySize(35, 35)
+            .setAlpha(0.8) // ให้ดูแตกต่างจากของในสต็อกเล็กน้อย
+            .setDepth(1); // ให้แสดงเหนือกล่องแต่ต่ำกว่า UI
+
+        this.boxSprites.add(clone); // เก็บสำเนาไว้ใน Group
+    }
+
+    showTempMessage(t,d=800, color='#c00'){
+        const tx=this.add.text(GAME_WIDTH/2,500,t,{fontSize:'18px',color:color, fontStyle:'bold', backgroundColor:'#fff', padding:{x:10,y:5}, fontFamily: 'Prompt'}).setOrigin(0.5);
+        this.time.delayedCall(d,()=>tx.destroy());
+    }
+    
+    resetPosition(o){
+        const k = o.getData('key');
+        o.x = this.initialPositions[k].x;
+        o.y = this.initialPositions[k].y;
+    }
+    
+    refreshStockTexts(){
+        ITEMS.forEach(it=>this.stockTexts[it.key].setText(stock[it.key] + ` (${it.value})`));
+        this.scoreText.setText('คะแนน: ' + score); 
+        this.progressText.setText(`(${deliveredOrders}/${ordersToLevelUp} ออเดอร์)`);
+    }
+    
+    newOrder(){
+        currentOrder=generateOrder();
+        if(this.orderDisplay)this.orderDisplay.destroy();
+        
+        if (Math.random() < 0.2) {
+            isRushOrder = true;
+            this.rushOrderStartTime = timeLeft;
+            this.orderDisplay=this.add.text(GAME_WIDTH/2,430,'⚡️ ออเดอร์เร่งด่วน (โบนัส 2x) ⚡️\n'+orderText(currentOrder),{fontSize:'16px',color:'#d32f2f',align:'center', fontStyle:'bold', backgroundColor: '#ffcdd2', padding:{x:10,y:5}, fontFamily: 'Prompt'}).setOrigin(0.5);
+            this.showTempMessage('⚡️ ออเดอร์เร่งด่วน! ต้องส่งใน 15 วิ', 2000, '#d32f2f');
+        } else {
+            isRushOrder = false;
+            this.orderDisplay=this.add.text(GAME_WIDTH/2,430,'📦 ออเดอร์:\n'+orderText(currentOrder),{fontSize:'16px',color:'#000',align:'center', fontFamily: 'Prompt'}).setOrigin(0.5);
+        }
+        
+        resetBoxContents();
+        for(let k in this.boxTexts)this.boxTexts[k].setText('กล่อง: 0');
+        
+        // ทำลาย Sprite เก่าในกล่องเมื่อเริ่มออเดอร์ใหม่
+        this.boxSprites.clear(true, true);
+    }
+    
+    // ล้างกล่อง ทำลาย Sprite
+    clearBox(){
+        resetBoxContents();
+        for(let k in this.boxTexts)this.boxTexts[k].setText('กล่อง: 0');
+        
+        this.boxSprites.clear(true, true); // ทำลาย Sprite ทั้งหมดใน Group
+        this.showTempMessage('🧽 ล้างกล่องแล้ว!',700, '#555');
+    }
+    
+    submitOrder(){
+        if(!currentOrder||Object.keys(currentOrder).length===0){this.showTempMessage('ยังไม่มีออเดอร์!',800);return;}
+        
+        let penalty=computePenalty(currentOrder,boxContents);
+        let match=isOrderMatch(currentOrder,boxContents);
+        
+        if(match){
+            let s=0;
+            for(let k in currentOrder){
+                let it=ITEMS.find(i=>i.key===k);
+                s+=(it?it.value:0)*currentOrder[k];
+            }
+            
+            let scoreMultiplier = isRushOrder ? 2 : 1;
+            let finalScore = s * scoreMultiplier;
+            score += finalScore;
+            
+            timeLeft += 10;
+            this.timeText.setText('เวลา: '+timeLeft+' วิ');
+            
+            deliveredOrders++;
+
+            if (deliveredOrders >= ordersToLevelUp) {
+                level++;
+                BOX_CAPACITY += 1; 
+                ordersToLevelUp += level * 2; 
+                deliveredOrders = 0; 
+                this.levelText.setText(`Level: ${level}`);
+                this.boxCapacityText.setText(`ความจุกล่อง: ${BOX_CAPACITY}`);
+                this.showTempMessage(`⬆️ Level Up! กล่องจุ ${BOX_CAPACITY} ชิ้น`, 2000, '#4caf50');
+                this.sound.play('success'); // 🎧 เสียง winner.mp3
+            } else {
+                 this.sound.play('success'); // 🎧 เสียง winner.mp3
+            }
+
+            this.showTempMessage(`🚚 ส่งสำเร็จ! ได้ +${finalScore} คะแนน และ +10 วินาที`, 1500, '#4caf50');
+            isRushOrder = false;
+        } else {
+            score=Math.max(0,score-penalty);
+            this.showTempMessage(`❌ ส่งผิด! ถูกหัก ${penalty} คะแนน`, 1500, '#d32f2f');
+            isRushOrder = false; 
+            this.sound.play('fail'); // 🎧 เสียง classic.mp3
+        }
+        
+        this.scoreText.setText('คะแนน: '+score);
+        this.newOrder(); 
+        this.refreshStockTexts();
+    }
+    
+    // ⬇️ ฟังก์ชันสร้างปุ่มทั้งหมด (เพิ่ม this.playClickSound() ) 
+    createHeaderButton(label,x,y,action){
+        const b=this.add.text(x,y,label,{fontSize:'14px',backgroundColor:'#ffffff',padding:{x:10,y:5},color:'#003366', fontFamily: 'Prompt', borderRadius: 5})
+        .setInteractive({useHandCursor:true}).setOrigin(0, 0.5) 
+        .on('pointerdown',() => {
+            this.playClickSound(); 
+            action();
+        })
+        .on('pointerover',()=>b.setStyle({backgroundColor:'#e0f7fa'}))
+        .on('pointerout',()=>b.setStyle({backgroundColor:'#ffffff'}));
+        return b;
+    }
+    
+    createContextualButton(label,x,y,action){
+        const b=this.add.text(x,y,label,{fontSize:'14px',backgroundColor:'#f8bbd0',padding:{x:8,y:8},color:'#5d4037', fontFamily: 'Prompt', borderRadius: 5})
+        .setInteractive({useHandCursor:true}).setOrigin(0.5)
+        .on('pointerdown',() => {
+            this.playClickSound(); 
+            action();
+        })
+        .on('pointerover',()=>b.setStyle({backgroundColor:'#f48fb1'}))
+        .on('pointerout',()=>b.setStyle({backgroundColor:'#f8bbd0'}));
+        return b;
+    }
+    
+    createSecondaryButton(label,x,y,action){
+        const b=this.add.text(x,y,label,{fontSize:'15px',backgroundColor:'#e0f7fa',padding:{x:12,y:10},color:'#003366', fontFamily: 'Prompt', borderRadius: 8})
+        .setInteractive({useHandCursor:true}).setOrigin(0.5)
+        .on('pointerdown',() => {
+            this.playClickSound(); 
+            action();
+        })
+        .on('pointerover',()=>b.setStyle({backgroundColor:'#b2ebf2'}))
+        .on('pointerout',()=>b.setStyle({backgroundColor:'#e0f7fa'}));
+        return b; 
+    }
+    
+    createStockButton(label,x,y,action){
+        const b=this.add.text(x,y,label,{fontSize:'15px',backgroundColor:'#fff3e0',padding:{x:12,y:10},color:'#6d4c41', fontFamily: 'Prompt', borderRadius: 8})
+        .setInteractive({useHandCursor:true}).setOrigin(0, 0.5)
+        .on('pointerdown',() => {
+            this.playClickSound(); 
+            action();
+        })
+        .on('pointerover',()=>b.setStyle({backgroundColor:'#ffe0b2'}))
+        .on('pointerout',()=>b.setStyle({backgroundColor:'#fff3e0'}));
+        return b;
+    }
+
+    createSubmitButton(label,x,y,action){
+        const b=this.add.text(x,y,label,{fontSize:'18px',backgroundColor:'#81c784',padding:{x:20,y:15},color:'#003366', fontStyle:'bold', fontFamily: 'Prompt', borderRadius: 10})
+        .setInteractive({useHandCursor:true}).setOrigin(1, 0.5)
+        .on('pointerdown',() => {
+            this.playClickSound(); 
+            action();
+        })
+        .on('pointerover',()=>b.setStyle({backgroundColor:'#a5d6a7'}))
+        .on('pointerout',()=>b.setStyle({backgroundColor:'#81c784'}));
+        return b;
+    }
+    // ⬆️ สิ้นสุดฟังก์ชันสร้างปุ่ม GameScene
+}
+
+/* -------- Stock Scene (ใช้ SFX) -------- */
+class StockScene extends Phaser.Scene{
+    constructor(){super('StockScene');}
+    preload(){
+        this.load.image('bg_stock','png/14.png');
+        ITEMS.forEach(i=>this.load.image(i.key,i.img));
+        
+        // 🆕 NEW: โหลดเสียงคลิกปุ่ม
+        this.load.audio('click', 'audio/click.mp3');
+    }
+    create(){
+        // 🆕 NEW: ฟังก์ชันเล่นเสียงคลิก (สำหรับ StockScene)
+        this.playClickSound = () => {
+            const gs = this.scene.get('GameScene');
+            if (gs && gs.playClickSound) {
+                 gs.playClickSound();
+            } else {
+                 this.sound.play('click', { volume: 0.8 });
+            }
+        };
+
+       this.add.image(GAME_WIDTH/2, GAME_HEIGHT/2, 'bg_stock').setDisplaySize(GAME_WIDTH, GAME_HEIGHT);
+       this.add.text(GAME_WIDTH/2,30,'หน้าเติมสต็อก',{fontSize:'22px',color:'#000', fontFamily: 'Prompt'}).setOrigin(0.5);
+       
+        const currentScoreText = this.add.text(GAME_WIDTH/2, 60, `คะแนนปัจจุบัน: ${score}`, {fontSize:'16px',color:'#003366', fontStyle:'bold', fontFamily: 'Prompt'}).setOrigin(0.5);
+       
+        this.purchaseCounts={};
+        
+        ITEMS.forEach((it,i)=>{
+            const x=60+(i%3)*120,y=100+Math.floor(i/3)*100;
+            this.add.image(x,y,it.key).setDisplaySize(50,50);
+            this.add.text(x,y+30,`${it.name} (${stock[it.key]})`,{fontSize:'12px',color:'#000', fontFamily: 'Prompt'}).setOrigin(0.5);
+            this.add.text(x,y+45,`(${it.cost} คะแนน/หน่วย)`,{fontSize:'10px',color:'#555', fontFamily: 'Prompt'}).setOrigin(0.5); 
+            
+            this.purchaseCounts[it.key]=0;
+            const minusX=x-25,plusX=x+25;
+            const countText=this.add.text(x,y+70,'0',{fontSize:'14px',color:'#000', fontFamily: 'Prompt'}).setOrigin(0.5);
+            
+            // 🆕 NEW: เพิ่มเสียงคลิกในปุ่ม + และ -
+            this.createSmallButton('-',minusX,y+70,()=>{
+                if(this.purchaseCounts[it.key]>0){
+                    this.purchaseCounts[it.key]--;
+                    countText.setText(this.purchaseCounts[it.key]);
+                    this.updateTotalCost(currentScoreText);
+                }
+            });
+            this.createSmallButton('+',plusX,y+70,()=>{
+                this.purchaseCounts[it.key]++;
+                countText.setText(this.purchaseCounts[it.key]);
+                this.updateTotalCost(currentScoreText);
+            });
+        });
+        
+        this.totalCostText = this.add.text(GAME_WIDTH/2, 530, 'รวมค่าใช้จ่าย: 0 คะแนน', {fontSize:'18px',color:'#c00', fontStyle:'bold', fontFamily: 'Prompt'}).setOrigin(0.5);
+
+        this.createButton('🔙 กลับ',60,580,()=>{timerPaused=false;this.scene.stop();});
+        
+        this.createButton('✅ สั่งซื้อ',220,580,()=>{
+            let totalCost = 0;
+            for(let k in this.purchaseCounts){
+                const qty = this.purchaseCounts[k];
+                if (qty > 0) {
+                    const item = ITEMS.find(i => i.key === k);
+                    totalCost += item.cost * qty;
+                }
+            }
+            
+            if (totalCost === 0) {
+                 alert('ยังไม่ได้เลือกสินค้าที่จะสั่งซื้อ!');
+                 return;
+            }
+
+            const gs = this.scene.get('GameScene');
+
+            if (score < totalCost) {
+                alert(`คะแนนไม่พอ! ต้องการ ${totalCost} คะแนน`);
+                if (gs) gs.sound.play('fail'); // 🎧 เสียง classic.mp3
+                return;
+            }
+
+            score -= totalCost;
+            for(let k in this.purchaseCounts){
+                stock[k] += this.purchaseCounts[k];
+            }
+            
+            alert(`สั่งซื้อสำเร็จ! ถูกหัก ${totalCost} คะแนน`);
+            timerPaused=false;
+            if(gs&&gs.refreshStockTexts)gs.refreshStockTexts();
+            if (gs) gs.sound.play('success'); // 🎧 เสียง winner.mp3
+            this.scene.stop();
+        });
+    }
+    
+    updateTotalCost(scoreText) {
+        let currentCost = 0;
+        for(let k in this.purchaseCounts){
+             const item = ITEMS.find(i => i.key === k);
+             currentCost += item.cost * this.purchaseCounts[k];
+        }
+        this.totalCostText.setText(`รวมค่าใช้จ่าย: ${currentCost} คะแนน`);
+    }
+    
+    // ⬇️ ฟังก์ชันสร้างปุ่ม StockScene (เพิ่ม this.playClickSound() ) 
+    createButton(l,x,y,a){
+        const b=this.add.text(x,y,l,{fontSize:'16px',backgroundColor:'#aed581',padding:{x:10,y:5},color:'#000', fontFamily: 'Prompt'})
+        .setInteractive({useHandCursor:true})
+        .on('pointerdown',()=>{
+            this.playClickSound();
+            a();
+        })
+        .on('pointerover',()=>b.setStyle({backgroundColor:'#c5e1a5'}))
+        .on('pointerout',()=>b.setStyle({backgroundColor:'#aed581'}));
+    }
+    
+    createSmallButton(l,x,y,a){
+        const b=this.add.text(x,y,l,{fontSize:'14px',backgroundColor:'#81c784',padding:{x:5,y:2},color:'#000', fontFamily: 'Prompt'})
+        .setOrigin(0.5).setInteractive({useHandCursor:true})
+        .on('pointerdown',()=>{
+            this.playClickSound();
+            a();
+        })
+        .on('pointerover',()=>b.setStyle({backgroundColor:'#a5d6a7'}))
+        .on('pointerout',()=>b.setStyle({backgroundColor:'#81c784'}));
+    }
+    // ⬆️ สิ้นสุดฟังก์ชันสร้างปุ่ม StockScene
+}
+
+/* -------- Result Scene (เพิ่มเสียงคลิก) -------- */
+class ResultScene extends Phaser.Scene{
+    constructor(){super('ResultScene');}
+    preload(){
+        // 🆕 NEW: โหลดเสียงคลิกปุ่ม
+        this.load.audio('click', 'audio/click.mp3');
+    }
+    create(){
+        // 🆕 NEW: ฟังก์ชันเล่นเสียงคลิก (สำหรับ ResultScene)
+        this.playClickSound = () => {
+            const gs = this.scene.get('GameScene');
+            if (gs && gs.playClickSound) {
+                 gs.playClickSound();
+            } else {
+                 this.sound.play('click', { volume: 0.8 });
+            }
+        };
+
+        this.add.rectangle(0,0,GAME_WIDTH,GAME_HEIGHT,0xfff3e0).setOrigin(0);
+        this.add.text(GAME_WIDTH/2,150,'สรุปผล',{fontSize:'28px',color:'#000', fontFamily: 'Prompt'}).setOrigin(0.5);
+        this.add.text(GAME_WIDTH/2,250,`คะแนนรวม: ${score} (Level ${level})`,{fontSize:'20px',color:'#000', fontFamily: 'Prompt'}).setOrigin(0.5); 
+
+        let name = prompt('กรอกชื่อของคุณเพื่อบันทึกคะแนน:');
+        if(!name || name.trim()==='') name = 'ผู้เล่น';
+        addScoreToLeaderboard(name, score);
+        
+        const topScores = getLeaderboard().slice(0, 5);
+        let leaderboardText = '🏆 5 อันดับสูงสุด 🏆\n\n';
+        topScores.forEach((d,i)=>leaderboardText+=`${i+1}. ${d.name} — ${d.score} คะแนน\n`);
+        
+        this.add.text(GAME_WIDTH/2, 320, leaderboardText, {fontSize:'16px',color:'#003366',align:'center', fontFamily: 'Prompt'}).setOrigin(0.5);
+
+
+        this.createButton('🔁 เริ่มใหม่',GAME_WIDTH/2,500,()=>location.reload());
+        this.createButton('🏠 หน้าหลัก',GAME_WIDTH/2,560,()=>this.scene.start('MenuScene'));
+    }
+    // ⬇️ ฟังก์ชันสร้างปุ่ม ResultScene (เพิ่ม this.playClickSound() ) 
+    createButton(l,x,y,a){
+        const b=this.add.text(x,y,l,{fontSize:'18px',backgroundColor:'#ffcc80',padding:{x:20,y:10},color:'#000', fontFamily: 'Prompt'})
+        .setOrigin(0.5).setInteractive({useHandCursor:true})
+        .on('pointerdown',()=>{
+            this.playClickSound();
+            a();
+        })
+        .on('pointerover',()=>b.setStyle({backgroundColor:'#ffe0b2'}))
+        .on('pointerout',()=>b.setStyle({backgroundColor:'#ffcc80'}));
+    }
+    // ⬆️ สิ้นสุดฟังก์ชันสร้างปุ่ม ResultScene
+}
+
+/*================ GAME INIT ================ */
+const config = {
+    type: Phaser.AUTO,
+    width: GAME_WIDTH,
+    height: GAME_HEIGHT,
+    parent: 'game-container',
+    backgroundColor: '#b3e5fc',
+    scene: [MenuScene, GameScene, StockScene, ResultScene]
+};
+
+new Phaser.Game(config);
+</script>
+</body>
+</html>
