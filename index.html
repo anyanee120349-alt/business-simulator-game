@@ -157,7 +157,7 @@ class MenuScene extends Phaser.Scene {
             ITEMS.forEach(i => stock[i.key] = MAX_STOCK);
             resetBoxContents(); currentOrder={};
             randomizePrices(); 
-            level = 1; ordersToLevelUp = 3; BOX_CAPACITY = 4;
+            level = 1; ordersToLevelUp = 3; BOX_CAPACITY = 6;
             this.scene.start('GameScene');
         });
         this.createButton('HOW TO PLAY 📘',390,()=>alert('ลากสินค้าตามออเดอร์ลงกล่องให้ครบภายในเวลาที่กำหนด! การส่งผิดจะถูกหักคะแนน และการเติมสต็อกก็มีค่าใช้จ่าย! แต่ละรอบราคาซื้อขายจะไม่เท่ากัน!'));
@@ -402,14 +402,14 @@ class GameScene extends Phaser.Scene {
             let finalScore = s * scoreMultiplier;
             score += finalScore;
             
-            timeLeft += 10;
+            timeLeft += 4;
             this.timeText.setText('เวลา: '+timeLeft+' วิ');
             
             deliveredOrders++;
 
             if (deliveredOrders >= ordersToLevelUp) {
                 level++;
-                BOX_CAPACITY += 1; 
+                BOX_CAPACITY += 2; 
                 ordersToLevelUp += level * 2; 
                 deliveredOrders = 0; 
                 this.levelText.setText(`Level: ${level}`);
@@ -420,7 +420,7 @@ class GameScene extends Phaser.Scene {
                  this.sound.play('success'); // 🎧 เสียง winner.mp3
             }
 
-            this.showTempMessage(`🚚 ส่งสำเร็จ! ได้ +${finalScore} คะแนน และ +10 วินาที`, 1500, '#4caf50');
+            this.showTempMessage(`🚚 ส่งสำเร็จ! ได้ +${finalScore} คะแนน และ +4 วินาที`, 1500, '#4caf50');
             isRushOrder = false;
         } else {
             score=Math.max(0,score-penalty);
